@@ -39,7 +39,7 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           ACCOUNT_NAME: ${{ secrets.ACCOUNT_NAME }}
-          HEADLESS: "true"
+          HEADLESS: "false"
           ORT_LOGGING_LEVEL: "3"
         run: |
           xvfb-run --auto-servernum python3 apprenew.py
