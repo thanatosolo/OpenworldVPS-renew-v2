@@ -103,6 +103,41 @@ def wait_for_cloudflare(page, timeout=15):
     return False
 
 
+def handle_turnstile_and_finish_login(page, timeout=50):
+    """
+    等待 Clerk SSO 回调真正完成（登录写 Cookie）。
+    Clerk 的 accounts.openworld.eu.org 回调页会先弹 Cloudflare Turnstile
+    人机验证（Verify you are human），必须等它通过后才会跳回主站。
+    等待期间尝试自动点击 Turnstile 复选框，并轮询直到跳回 openworld.eu.org。
+    """
+    print("   ⏳ 等待 Clerk/Cloudflare Turnstile 验证完成...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        # 1) 若存在 Turnstile iframe 复选框，尝试点击（失败忽略，部分情况会自动通过）
+        try:
+            for frame in page.frames:
+                furl = frame.url or ""
+                if "challenges.cloudflare.com" in furl:
+                    try:
+                        frame.locator("label").first.click(timeout=1200)
+                    except Exception:
+                        pass
+                    try:
+                        frame.locator("input[type='checkbox']").first.click(timeout=1200)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 2) 是否已跳回主站（登录完成）
+        url = page.url or ""
+        if url.startswith("https://openworld.eu.org"):
+            return True, url
+        page.wait_for_timeout(1000)
+
+    return False, (page.url or "")
+
+
 def login_with_discord_token(page, dc_token: str) -> bool:
     print("=" * 50)
     print("🔑 开始 Discord OAuth 登录流程")
@@ -306,29 +341,17 @@ def login_with_discord_token(page, dc_token: str) -> bool:
     except Exception as e:
         print(f"   ⚠️ 回调页面加载异常（可能正常）: {e}")
 
-    time.sleep(5)
-    wait_for_cloudflare(page)
+    ok, final_url = handle_turnstile_and_finish_login(page)
+    print(f"   回调后最终 URL: {final_url}")
 
-    final_url = page.url
-    print(f"   回调后 URL: {final_url}")
-
-    if "/login" in final_url and "discord" not in final_url:
-        print("   ⚠️ 回调后仍在登录页，登录可能失败")
-        time.sleep(5)
-        final_url = page.url
-        if "/login" in final_url:
-            print(f"   ❌ 登录最终失败，停留在: {final_url}")
-            save_screenshot(page, "login_callback_stuck")
-            return False
-
-    if "openworld.eu.org" in final_url:
+    if ok and final_url.startswith("https://openworld.eu.org"):
         print(f"   ✅ 登录成功！当前 URL: {final_url}")
         save_screenshot(page, "login_success")
         return True
 
-    print(f"   ⚠️ 登录状态不确定，当前 URL: {final_url}")
-    save_screenshot(page, "login_uncertain")
-    return True
+    print(f"   ❌ 登录未完成，停留在: {final_url}（可能卡在 Turnstile 验证或回调）")
+    save_screenshot(page, "login_callback_stuck")
+    return False
 
 
 def extract_gif_frames(gif_bytes: bytes) -> list:
