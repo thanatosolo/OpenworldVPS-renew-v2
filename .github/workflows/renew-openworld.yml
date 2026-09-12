@@ -1,0 +1,110 @@
+name: Auto Renew Openworld VPS
+
+on:
+  schedule:
+    - cron: '30 0 */2 * *' # 每2天UTC 0点30分 (北京时间8点30分)
+    # 自行调整，下方备注取消前面的#号即可生效，注意只允许一条规则存在，建议每4天或者每5天续期一次
+    # - cron: '0 1 */3 * *' # 每3天UTC 1点 (北京时间9点)
+    # - cron: '30 1 */4 * *' # 每4天UTC 1点30分 (北京时间9点30分)
+    # - cron: '0 2 */5 * *' # 每5天UTC 2点 (北京时间10点)
+  workflow_dispatch:
+
+jobs:
+  Renew-openworld:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ⚙ 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 🛠️ 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb fonts-noto-cjk
+          pip install playwright requests ddddocr Pillow numpy
+          playwright install --with-deps chromium
+
+      # 脚本内置登录修复（适配新登录页 /login + Clerk 跳转 + redirect_to 解码），
+      # 失败时会以非零退出码结束，任务会标红，通知判据即真实结果（不再误报成功）
+      - name: 🚀 运行 Openworld 续期脚本
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          ACCOUNT_NAME: ${{ secrets.ACCOUNT_NAME }}
+          HEADLESS: "true"
+          ORT_LOGGING_LEVEL: "3"
+        run: |
+          xvfb-run --auto-servernum python3 apprenew.py
+
+      - name: 💾 上传验证码 GIF / 调试截图
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: captcha-gifs
+          path: |
+            *.gif
+            *.png
+            *.html
+          if-no-files-found: ignore
+          retention-days: 3
+
+      - name: 🧽 清理进程
+        if: always()
+        run: |
+          pkill -f chromium || true
+          pkill -f Xvfb || true
+
+      - name: 🧹 清理旧的工作流运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          count=0
+          for run_id in $runs; do
+            count=$((count + 1))
+            if [ $count -gt 1 ]; then
+              echo "删除运行记录: $run_id"
+              gh run delete $run_id || true
+            fi
+          done
+
+      # 脚本失败会退出非0 → job 标红 → 这里发"失败"通知；脚本成功 → 发"成功"通知
+      - name: 📢 发送通知
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            RESULT="✅ Openworld VPS 续期成功"
+          else
+            RESULT="❌ Openworld VPS 续期失败"
+          fi
+          TIME=$(date '+%Y-%m-%d %H:%M:%S')
+          DESP=$(printf "%s\n时间：%s" "$RESULT" "$TIME")
+
+          # 发送到 Discord (纯文本)
+          curl -s -H "Content-Type: application/json" \
+            -d "{\"content\":\"$RESULT | 时间：$TIME\"}" \
+            "${{ secrets.DISCORD_WEBHOOK }}" || true
+
+          # 发送到 Server酱微信（URL 参数自动编码，修复中文/空格导致发送失败）
+          curl -sG "https://sctapi.ftqq.com/${{ secrets.SERVERCHAN_KEY }}.send" \
+            --data-urlencode "title=VPS续期通知" \
+            --data-urlencode "desp=$DESP" || true
+
+      - name: ♻️ 保活提交（防止定时任务 60 天无活动被禁用）
+        if: always()
+        run: |
+          echo "$(date -u +'%Y-%m-%d %H:%M:%S') UTC" > .keepalive
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .keepalive
+          git commit -m "chore: keepalive [skip ci]" || echo "无变化，跳过"
+          git push || echo "推送失败（无权限或无需推送）"
