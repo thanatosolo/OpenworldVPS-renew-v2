@@ -103,7 +103,32 @@ def wait_for_cloudflare(page, timeout=15):
     return False
 
 
-def handle_turnstile_and_finish_login(page, timeout=50):
+def try_click_turnstile(page):
+    """尝试点击 Turnstile 复选框（iframe 内）。返回是否进行了点击。"""
+    clicked = False
+    try:
+        for frame in page.frames:
+            furl = frame.url or ""
+            if "challenges.cloudflare.com" in furl or "turnstile" in furl:
+                try:
+                    frame.wait_for_selector(
+                        ".ctp-checkbox-label, input[type='checkbox'], label",
+                        timeout=4000)
+                except Exception:
+                    continue
+                for sel in (".ctp-checkbox-label", "input[type='checkbox']", "label"):
+                    try:
+                        frame.locator(sel).first.click(timeout=1500)
+                        clicked = True
+                        break
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    return clicked
+
+
+def handle_turnstile_and_finish_login(page, timeout=60):
     """
     等待 Clerk SSO 回调真正完成（登录写 Cookie）。
     Clerk 的 accounts.openworld.eu.org 回调页会先弹 Cloudflare Turnstile
@@ -114,20 +139,7 @@ def handle_turnstile_and_finish_login(page, timeout=50):
     deadline = time.time() + timeout
     while time.time() < deadline:
         # 1) 若存在 Turnstile iframe 复选框，尝试点击（失败忽略，部分情况会自动通过）
-        try:
-            for frame in page.frames:
-                furl = frame.url or ""
-                if "challenges.cloudflare.com" in furl:
-                    try:
-                        frame.locator("label").first.click(timeout=1200)
-                    except Exception:
-                        pass
-                    try:
-                        frame.locator("input[type='checkbox']").first.click(timeout=1200)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        try_click_turnstile(page)
 
         # 2) 是否已跳回主站（登录完成）
         url = page.url or ""
@@ -884,6 +896,16 @@ def main():
                         "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"),
             viewport={"width": 1280, "height": 720},
         )
+        # 反自动化检测：抹掉 Playwright 指纹，帮助通过 Cloudflare Turnstile
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = window.chrome || { runtime: {}, loadTimes: function(){}, csi: function(){} };
+            Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN','zh','en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            const _gpo = Object.getOwnPropertyDescriptor(Navigator.prototype, 'userAgent');
+            Object.defineProperty(navigator, 'userAgent', {get: () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'});
+            window.Notification = undefined;
+        """)
         page = context.new_page()
 
         try:
